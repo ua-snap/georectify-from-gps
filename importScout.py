@@ -1,4 +1,4 @@
-#!/opt/local/bin/python
+#!/usr/bin/env python
 
 ###############################################################################
 # importScout.py 
@@ -46,6 +46,7 @@ from PIL.ExifTags import TAGS
 import sys
 import math
 import numpy as np
+from pyproj import transform,Proj
 
 # Optional modules
 
@@ -53,7 +54,6 @@ try:
     import matplotlib.pylab as plt
     from matplotlib import pyplot
     import mpl_toolkits.mplot3d.axes3d as p3
-    from pyproj import transform,Proj
     mpl = True
 except ImportError:
     mpl = False
@@ -157,18 +157,21 @@ def createTransform(lat,lon,alt,bearing):
     return xUL,xres,xrot,yUL,yrot,yres
 
 def parseNFO(file):
-    f = open(file)
-    j = 0
-    lines = 28
-    key = []
-    value = []
-    for line in f:
-        (k,v) = line.split('=')
-        key.append(k.rstrip())
-        value.append(v.rstrip())
-        j = j+1
-    return key,value
-
+    try:
+        f = open(file)
+        j = 0
+        lines = 28
+        key = []
+        value = []
+        for line in f:
+            (k,v) = line.split('=')
+            key.append(k.rstrip())
+            value.append(v.rstrip())
+            j = j+1
+        return key,value
+    except ValueError as e:
+        raise ValueError("NFO file is malformed")
+    
 def writeGDALFile(filename,transform,proj,datar,datag,datab):
     (y,x) = datar.shape
     format = "GTiff"
@@ -279,25 +282,34 @@ if __name__=='__main__':
             os.system(cmd)
     
         elif 'tif' in file:
-            nfoFile = file.replace('tif','nfo')
-            key,value = parseNFO(nfoFile)
-            lat = float(value[key.index('gps_lat_deg')])
-            lon = float(value[key.index('gps_lon_deg')])
-            lat = lat*np.pi/180.0
-            lon = lon*np.pi/180.0
-            alt = float(value[key.index('alt_agl')])
-            bearing = float(value[key.index('yaw_deg')])
-            (xsize,ysize,datar,datag,datab) = read_gdal_file(file,bearing,plot)
-            # bearing is corrected as data are read in as though they are collected along northern bearing line
-            if bearing > 90 and bearing < 270:
-                bearing = bearing - 180
-            trans = createTransform(lat,lon,alt,bearing)
-            tifFile = file.replace('tif','tiff')
-            writeGDALFile('temp.tif',trans,proj,datar,datag,datab)
-            cmd = 'gdalwarp -dstnodata 0,0,0  -t_srs EPSG:32611 temp.tif '+tifFile+' > /dev/null'
-            #print cmd
-            os.system(cmd)
+            try:
+                nfoFile = file.replace('tif','nfo')
+                tiffFile = file.replace('tif','tiff')
 
+                # If the output file exists, skip.  TODO, make it possible to
+                # override with --force or --overwrite.
+                if os.path.exists(tiffFile):
+                    print "File already processed, skipping.\n"
+                    continue
 
-
+                key,value = parseNFO(nfoFile)
+                lat = float(value[key.index('gps_lat_deg')])
+                lon = float(value[key.index('gps_lon_deg')])
+                lat = lat*np.pi/180.0
+                lon = lon*np.pi/180.0
+                alt = float(value[key.index('alt_agl')])
+                bearing = float(value[key.index('yaw_deg')])
+                (xsize,ysize,datar,datag,datab) = read_gdal_file(file,bearing,plot)
+                # bearing is corrected as data are read in as though they are collected along northern bearing line
+                if bearing > 90 and bearing < 270:
+                    bearing = bearing - 180
+                trans = createTransform(lat,lon,alt,bearing)
+                writeGDALFile('temp.tif',trans,proj,datar,datag,datab)
+                cmd = 'gdalwarp -dstnodata 0,0,0  -t_srs EPSG:32611 temp.tif '+tiffFile+' > /dev/null'
+                #print cmd
+                os.system(cmd)
+            except IOError as e:
+                print "Unable to process file (" + file + "): I/O error({0}): {1}".format(e.errno, e.strerror)
+            except ValueError as e:
+                print "Unable to process file (" + file + "): " + str(e)
 

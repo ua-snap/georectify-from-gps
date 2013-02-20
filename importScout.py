@@ -82,124 +82,133 @@ kmlTemplate = """\
 </kml>
 """
 
-def getExif(fn):
-    ret = {}
-    i = Image.open(fn)
-    info = i._getexif()
-    for tag, value in info.items():
-        decoded = TAGS.get(tag, tag)
-        ret[decoded] = value
-    return ret
+
+# Responsible for figuring out image and camera properties from a file
+class GeoImage:
+    def __init__(self, file):
+        self.file = file
+
+        # Image properties
+        self.lat = None
+        self.lon = None
+        self.alt = None
+        self.bearing = None
+
+        # Camera properties
+        self.xRes = None  # xResolution of physical sensor (pixels)
+        self.yRes = None  # yResolution of physical sensor (pixels)
+        self.xFovRad = None  # xFOV in Radians
+        self.yFovRad = None  # yFov in Radians
+        self.xSizeMm = None  # x sensor size (mm)
+        self.ySizeMm = None  # y sensor size (mm)
+        self.focalLength = None  # focal length (mm)
+
+    # To be implemented by child classes
+    def parseCameraParams(self):
+        return
+
+    # to be implemented by child classes
+    def parseImageParams(self):
+        return
 
 
-def getGPSData(exif):
-    # Read the exif data returned by getExif and parse out GPS lat, lon, alt and bearing
-    lat = [float(x) / float(y) for x, y in exif['GPSInfo'][2]]
-    latref = exif['GPSInfo'][1]
-    lon = [float(x) / float(y) for x, y in exif['GPSInfo'][4]]
-    lonref = exif['GPSInfo'][3]
-    alt = float(exif['GPSInfo'][6][0]) / float(exif['GPSInfo'][6][1])
-    bearing = float(exif['GPSInfo'][24][0]) / float(exif['GPSInfo'][24][1])
+class ScoutFlirGeoImage(GeoImage):
+    def parseCameraParams(self):
+        self.xFovRad = math.radians(32)
+        self.yFovRad = math.radians(26)
 
-    lat = lat[0] + lat[1] / 60 + lat[2] / 3600
-    lon = lon[0] + lon[1] / 60 + lon[2] / 3600
-    if latref == 'S':
-        lat = -lat
-    if lonref == 'W':
-        lon = -lon
+    def parseImageParams(self):
+        exif = {}
+        i = Image.open(self.file)
+        info = i._getexif()
+        for tag, value in info.items():
+            decoded = TAGS.get(tag, tag)
+            exif[decoded] = value
 
-    logging.debug('getGPSData: lat {} lon {} alt {} bearing {}'.format(lat, lon, alt, bearing))
-    return lat, lon, alt, bearing
+        # Read the exif data returned by getExif and parse out GPS lat, lon, alt and bearing
+        lat = [float(x) / float(y) for x, y in exif['GPSInfo'][2]]
+        latref = exif['GPSInfo'][1]
+        lon = [float(x) / float(y) for x, y in exif['GPSInfo'][4]]
+        lonref = exif['GPSInfo'][3]
+        alt = float(exif['GPSInfo'][6][0]) / float(exif['GPSInfo'][6][1])
+        bearing = float(exif['GPSInfo'][24][0]) / float(exif['GPSInfo'][24][1])
 
+        # Convert bearing/lat/lon to usable values
+        if bearing > 90 and bearing < 270:
+            bearing = bearing - 180
 
-def createTransform(lat, lon, alt, bearing):
-    # This function calculates the necessary image parameters to generate a
-    # standard world file.  Requires lat,lon,alt,bearing provided by getGPSData
-    inProj = Proj(init='epsg:4326')
-    outProj = Proj(init='epsg:4326')
-    lat = lat * 180.0 / np.pi
-    lon = lon * 180.0 / np.pi
-    east, north = transform(inProj, outProj, lon, lat)
-    logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north))
-    (xres, yres) = calcResolution(alt)
+        lat = lat[0] + lat[1] / 60 + lat[2] / 3600
+        lon = lon[0] + lon[1] / 60 + lon[2] / 3600
+        if latref == 'S':
+            lat = -lat
+        if lonref == 'W':
+            lon = -lon
 
-    # hard coded to scout parameters for PhotoS3 camera
-    xsize = 640  # for flir tau, 2592=s3
-    ysize = 480  # for flir tau, 1944=s3
-
-    # Calculate the distance (in m from center to corner of image)
-    xd = xres * xsize / 2
-    yd = yres * ysize / 2
-    radius = math.sqrt(xd ** 2 + yd ** 2)
-    offset = math.atan(xd / yd)
-    bearingRad = bearing * np.pi / 180
-    xUL = east + radius * math.sin(bearingRad + offset)
-    yUL = north + radius * math.cos(bearingRad + offset)
-
-    if bearing > 180:
-        b2 = bearing - 360
-        bearingRad = b2 * np.pi / 180.0
-
-    xrot = -1 * xres * math.sin(bearingRad)
-    yrot = yres * math.sin(bearingRad)
-    xres = xres * math.cos(bearingRad)
-    yres = yres * math.cos(bearingRad)
-
-    return xUL, xres, xrot, yUL, yrot, yres
+        logging.debug('getGPSData: lat {} lon {} alt {} bearing {}'.format(lat, lon, alt, bearing))
+        (self.lat, self.lon, self.alt, self.bearing) = (lat, lon, alt, bearing)
 
 
+# From a GeoImage, perform the georectification calculations
+# Starting by hardcoding for this to be just the FLIR, will make it a superclass later
+class GeoRectifier:
+    def __init__(self, geoImage):
+        self.geoImage = geoImage
+
+    def transform(self):
+
+        inProj = Proj(init='EPSG:4326')
+        outProj = Proj(init='EPSG:3857')
+
+        logging.debug(self.geoImage.lon)
+        logging.debug(self.geoImage.lat)
+        logging.debug(pprint.pformat(self.geoImage))
+
+        (east, north) = transform(inProj, outProj, self.geoImage.lon, self.geoImage.lat)
+        logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(self.geoImage.lon, self.geoImage.lat, east, north))
+
+        self.xFovM = self.geoImage.alt * math.tan(self.geoImage.xFovRad / 2)
+        self.yFovM = self.geoImage.alt * math.tan(self.geoImage.yFovRad / 2)
+
+        logging.debug("xFovM {} yFovM {}".format(self.xFovM, self.yFovM))
+        logging.debug("Altitude {} Bearing {}".format(self.geoImage.alt, self.geoImage.bearing))
+        logging.debug("Footprint in meters: {} x {} y".format(self.xFovM * 2, self.yFovM * 2))
+
+        offsetUrX, offsetUrY = rotate(self.geoImage.bearing, self.xFovM, self.yFovM)  # ur = upper right
+        offsetUlX, offsetUlY = rotate(self.geoImage.bearing, -self.xFovM, self.yFovM)  # ul
+        offsetLlX, offsetLlY = rotate(self.geoImage.bearing, -self.xFovM, -self.yFovM)  # ll
+        offsetLrX, offsetLrY = rotate(self.geoImage.bearing, self.xFovM, -self.yFovM)  # lr
+
+        logging.debug("Offsets: {} {}\n{} {}\n{} {}\n{} {}".format(offsetUrX, offsetUrY, offsetUlX, offsetUlY, offsetLlX, offsetLlY, offsetLrX, offsetLrY))
+
+        self.lonUR = east + offsetUrX
+        self.latUR = north + offsetUrY
+        self.lonUL = east + offsetUlX
+        self.latUL = north + offsetUlY
+        self.lonLL = east + offsetLlX
+        self.latLL = north + offsetLlY
+        self.lonLR = east + offsetLrX
+        self.latLR = north + offsetLrY
+
+        logging.debug("{},{},0\n{},{},0\n{},{},0\n{},{},0".format(self.lonUR, self.latUR, self.lonUL, self.latUL, self.lonLL, self.latLL, self.lonLR, self.latLR))
+
+        return {
+            'lonUR': self.lonUR,
+            'latUR': self.latUR,
+            'lonUL': self.lonUL,
+            'latUL': self.latUL,
+            'lonLL': self.lonLL,
+            'latLL': self.latLL,
+            'lonLR': self.lonLR,
+            'latLR': self.latLR
+        }
+
+
+# Convenience function to rotate a point in space.
 def rotate(angle, x, y):
     angle = math.radians(angle)
     xr = (x * math.cos(angle)) - (y * math.sin(angle))
     yr = (x * math.sin(angle)) + (y * math.cos(angle))
     return xr, yr
-
-
-def createBoxTransform(lat, lon, alt, bearing):
-
-    inProj = Proj(init='EPSG:4326')
-    outProj = Proj(init='EPSG:3857')
-    #bearing += 90  # correct for scout northing
-
-    east, north = transform(inProj, outProj, lon, lat)
-    logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north))
-
-    logging.debug('Center Point: ' + str(east) + ' ' + str(north))
-
-    (xSizeM, ySizeM) = calcResolutionFlir(alt)
-
-    logging.debug("Altitude {} Bearing {}".format(alt, bearing))
-    logging.debug("Footprint in meters: {} x {} y".format(xSizeM * 2, ySizeM * 2))
-    logging.debug("xSizeM {} ySizeM {}".format(xSizeM, ySizeM))
-
-    offsetUrX, offsetUrY = rotate(bearing, xSizeM, ySizeM)  # ur = upper right
-    offsetUlX, offsetUlY = rotate(bearing, -xSizeM, ySizeM)  # ul
-    offsetLlX, offsetLlY = rotate(bearing, -xSizeM, -ySizeM)  # ll
-    offsetLrX, offsetLrY = rotate(bearing, xSizeM, -ySizeM)  # lr
-
-    logging.debug("Offsets: {} {}\n{} {}\n{} {}\n{} {}".format(offsetUrX, offsetUrY, offsetUlX, offsetUlY, offsetLlX, offsetLlY, offsetLrX, offsetLrY))
-
-    lonUR = east + offsetUrX
-    latUR = north + offsetUrY
-    lonUL = east + offsetUlX
-    latUL = north + offsetUlY
-    lonLL = east + offsetLlX
-    latLL = north + offsetLlY
-    lonLR = east + offsetLrX
-    latLR = north + offsetLrY
-
-    logging.debug("{},{},0\n{},{},0\n{},{},0\n{},{},0".format(lonUR, latUR, lonUL, latUL, lonLL, latLL, lonLR, latLR))
-
-    return {
-        'lonUR': lonUR,
-        'latUR': latUR,
-        'lonUL': lonUL,
-        'latUL': latUL,
-        'lonLL': lonLL,
-        'latLL': latLL,
-        'lonLR': lonLR,
-        'latLR': latLR
-    }
 
 
 def getKmlPoly(trans):
@@ -230,96 +239,6 @@ def getKmlPoly(trans):
       </outerBoundaryIs>
     </Polygon>
     """.format(**kml)
-
-
-def parseNFO(file):
-    try:
-        f = open(file)
-        j = 0
-        #lines = 28
-        key = []
-        value = []
-        for line in f:
-            (k, v) = line.split('=')
-            key.append(k.rstrip())
-            value.append(v.rstrip())
-            j = j + 1
-        return key, value
-    except ValueError as e:
-        raise ValueError("NFO file is malformed (" + e + ")")
-
-
-def writeGDALFile(filename, transform, proj, datar, datag, datab):
-    (y, x) = datar.shape
-    format = "GTiff"
-    driver = gdal.GetDriverByName(format)
-    dst_datatype = gdal.GDT_UInt16
-    dst_ds = driver.Create(filename, x, y, 3, dst_datatype)
-    dst_ds.GetRasterBand(1).WriteArray(datar)
-    dst_ds.GetRasterBand(2).WriteArray(datag)
-    dst_ds.GetRasterBand(3).WriteArray(datab)
-    dst_ds.SetGeoTransform(transform)
-    dst_ds.SetProjection(proj)
-    return 1
-
-
-def writeSimpleFile(filename, data):
-    (y, x) = data.shape
-    format = "GTiff"
-    driver = gdal.GetDriverByName(format)
-    dst_datatype = gdal.GDT_Byte
-    dst_ds = driver.Create(filename, x, y, 1, dst_datatype)
-    dst_ds.GetRasterBand(1).WriteArray(data)
-    return 1
-
-
-def read_gdal_file(file, bearing, plot=0):
-    filehandle = gdal.Open(file)
-    banddata = filehandle.GetRasterBand(1)
-    datar = banddata.ReadAsArray() + 1
-    banddatag = filehandle.GetRasterBand(2)
-    datag = banddatag.ReadAsArray() + 1
-    banddatab = filehandle.GetRasterBand(3)
-    datab = banddatab.ReadAsArray() + 1
-    if bearing > 90 and bearing < 270:
-        datar = np.fliplr(np.flipud(datar))
-        datag = np.fliplr(np.flipud(datag))
-        datab = np.fliplr(np.flipud(datab))
-    if plot == 1:
-        pyplot.figure()
-        pyplot.imshow(datag)
-        pyplot.show()
-    return filehandle.RasterXSize, filehandle.RasterYSize, datar, datag, datab
-
-
-def calcResolution(alt):
-    # Define parameters for Scout camera
-    xsize = 2592
-    ysize = 1944
-    xsizemm = 5.7024
-    ysizemm = 4.2768
-    fl = 7.5
-    xfov = 2*math.atan(xsizemm/(2*fl))
-    yfov = 2*math.atan(ysizemm/(2*fl))
-    xfovm = 2*math.tan(xfov/2)*alt
-    yfovm = 2*math.tan(yfov/2)*alt
-    xrescm = xfovm/xsize
-    yrescm = -1*yfovm/ysize
-    print xrescm
-    print yrescm
-    return xrescm,yrescm
-
-
-def calcResolutionFlir(altM):
-
-    xfovRad = 32 * (np.pi / 180)
-    yfovRad = 26 * (np.pi / 180)
-
-    xfovm = altM * math.tan(xfovRad / 2)
-    yfovm = altM * math.tan(yfovRad / 2)
-
-    logging.debug("xFovM {} yFovM {}".format(xfovm, yfovm))
-    return xfovm, yfovm
 
 
 if __name__ == '__main__':
@@ -358,14 +277,13 @@ if __name__ == '__main__':
         # Assuming for now that JPG === infrared/FLIR.
         if 'jpg' in file.name:
             try:
-                exif = getExif(file)
-                (lat, lon, alt, bearing) = getGPSData(exif)
 
-                # bearing is corrected as data are read in as though they are collected along northern bearing line
-                if bearing > 90 and bearing < 270:
-                    bearing = bearing - 180
+                i = ScoutFlirGeoImage(file)
+                i.parseCameraParams()
+                i.parseImageParams()
 
-                trans = createBoxTransform(lat, lon, alt, bearing)
+                r = GeoRectifier(i)
+                trans = r.transform()
 
                 trans['sourceFile'] = file.name
                 trans['tempFile'] = tempFile
@@ -393,7 +311,63 @@ if __name__ == '__main__':
             except ValueError as e:
                 logging.warning("Unable to process file (" + file.name + "): " + str(e))
 
-        elif 'dng' in file:
+
+
+    if(True == args.kml):
+        if(args.kml):
+            if(os.path.exists('coverage.kml')):
+                os.unlink('coverage.kml')
+        kmlFile = open('coverage.kml', 'w')
+        kmlFile.write(kmlTemplate.format(kml))
+        kmlFile.close()
+
+
+
+"""
+to implement later / swamp:
+
+class ScoutPhotoS3GeoImage(GeoImage):
+    def parseCameraParams(self):
+        self.xSizeMm = 5.7024
+        self.ySizeMm = 4.2768
+        self.focalLength = 7.5
+
+    def parseNFO(file):
+        try:
+            f = open(file)
+            j = 0
+            #lines = 28
+            key = []
+            value = []
+            for line in f:
+                (k, v) = line.split('=')
+                key.append(k.rstrip())
+                value.append(v.rstrip())
+                j = j + 1
+            return key, value
+        except ValueError as e:
+            raise ValueError("NFO file is malformed (" + e + ")")
+
+
+def calcResolution():
+        # Define parameters for Scout camera
+        xsize = 2592
+        ysize = 1944
+        xsizemm = 5.7024
+        ysizemm = 4.2768
+        fl = 7.5
+        xfov = 2*math.atan(xsizemm/(2*fl))
+        yfov = 2*math.atan(ysizemm/(2*fl))
+        xfovm = 2*math.tan(xfov/2)*alt
+        yfovm = 2*math.tan(yfov/2)*alt
+        xrescm = xfovm/xsize
+        yrescm = -1*yfovm/ysize
+        print xrescm
+        print yrescm
+        return xrescm,yrescm
+
+
+         elif 'dng' in file:
             (xsize, ysize, data) = read_gdal_file(file, bearing, 2)
             nfoFile = file.replace('dng', 'nfo')
             key, value = parseNFO(nfoFile)
@@ -439,10 +413,43 @@ if __name__ == '__main__':
             except ValueError as e:
                 print "Unable to process file (" + file + "): " + str(e)
 
-    if(True == args.kml):
-        if(args.kml):
-            if(os.path.exists('coverage.kml')):
-                os.unlink('coverage.kml')
-        kmlFile = open('coverage.kml', 'w')
-        kmlFile.write(kmlTemplate.format(kml))
-        kmlFile.close()
+
+
+def createTransform(lat, lon, alt, bearing):
+    # This function calculates the necessary image parameters to generate a
+    # standard world file.  Requires lat,lon,alt,bearing provided by getGPSData
+    inProj = Proj(init='epsg:4326')
+    outProj = Proj(init='epsg:4326')
+    lat = lat * 180.0 / np.pi
+    lon = lon * 180.0 / np.pi
+    east, north = transform(inProj, outProj, lon, lat)
+    logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north))
+    (xres, yres) = calcResolution(alt)
+
+    # hard coded to scout parameters for PhotoS3 camera
+    xsize = 640  # for flir tau, 2592=s3
+    ysize = 480  # for flir tau, 1944=s3
+
+    # Calculate the distance (in m from center to corner of image)
+    xd = xres * xsize / 2
+    yd = yres * ysize / 2
+    radius = math.sqrt(xd ** 2 + yd ** 2)
+    offset = math.atan(xd / yd)
+    bearingRad = bearing * np.pi / 180
+    xUL = east + radius * math.sin(bearingRad + offset)
+    yUL = north + radius * math.cos(bearingRad + offset)
+
+    if bearing > 180:
+        b2 = bearing - 360
+        bearingRad = b2 * np.pi / 180.0
+
+    xrot = -1 * xres * math.sin(bearingRad)
+    yrot = yres * math.sin(bearingRad)
+    xres = xres * math.cos(bearingRad)
+    yres = yres * math.cos(bearingRad)
+
+    return xUL, xres, xrot, yUL, yrot, yres
+
+
+
+                """

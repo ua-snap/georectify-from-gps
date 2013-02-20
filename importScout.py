@@ -201,6 +201,38 @@ def createBoxTransform(lat, lon, alt, bearing):
     }
 
 
+def dumpKmlPoly(trans):
+
+    outProj = Proj(init='EPSG:4326')
+    inProj = Proj(init='EPSG:3857')
+
+    kml = dict()
+    kml['lonUL'], kml['latUL'] = transform(inProj, outProj, trans['lonUL'], trans['latUL'])
+    kml['lonUR'], kml['latUR'] = transform(inProj, outProj, trans['lonUR'], trans['latUR'])
+    kml['lonLL'], kml['latLL'] = transform(inProj, outProj, trans['lonLL'], trans['latLL'])
+    kml['lonLR'], kml['latLR'] = transform(inProj, outProj, trans['lonLR'], trans['latLR'])
+
+    f = open('test.kml', 'a')
+    f.write("""
+    <Polygon>
+      <extrude>1</extrude>
+      <altitudeMode>clampToGround</altitudeMode>
+      <outerBoundaryIs>
+        <LinearRing>
+          <coordinates>
+            {lonUL},{latUL},0
+            {lonUR},{latUR},0
+            {lonLR},{latLR},0
+            {lonLL},{latLL},0
+            {lonUL},{latUL},0
+          </coordinates>
+        </LinearRing>
+      </outerBoundaryIs>
+    </Polygon>
+    """.format(**kml))
+    f.close()
+    
+
 def parseNFO(file):
     try:
         f = open(file)
@@ -356,6 +388,9 @@ if __name__ == '__main__':
 
                 gdalTransformCommand = 'gdal_translate -a_srs EPSG:3857 -of GTiff -gcp 0 0 {lonUL} {latUL} -gcp 640 0 {lonUR} {latUR} -gcp 0 480 {lonLL} {latLL} -gcp 640 480 {lonLR} {latLR} {sourceFile} {tempFile}'.format(**trans)
                 print gdalTransformCommand
+
+                dumpKmlPoly(trans)
+
                 os.system(gdalTransformCommand)
                 gdalWarpCommand = 'gdalwarp -s_srs EPSG:3857 -t_srs EPSG:4326 -dstalpha -dstnodata 0,0,0,0 {tempFile} {outputFile}'.format(**trans)
                 print gdalWarpCommand

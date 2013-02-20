@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 
 ###############################################################################
-# importScout.py 
+# importScout.py
 #
 # Project:  Aeryon Scout data processing
-# Purpose:  Reads images from the Aeryon scout system and geocodes them to UTM projection 
+# Purpose:  Reads images from the Aeryon scout system and geocodes them to UTM projection
 # Authors:   Scott Arko, Bruce Crevensten
 #
 ###############################################################################
-# Copyright (c) 2013, Scott Arko, Bruce Crevensten 
+# Copyright (c) 2013, Scott Arko, Bruce Crevensten
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Library General Public
@@ -48,38 +48,39 @@ import math
 import numpy as np
 from pyproj import transform, Proj
 import pprint
+import argparse
+import logging
 
-# Optional modules
-try:
-    import vlfeat as vl
-    sift = True
-except ImportError:
-    sift = False
+# For debugging.  Example: pp.pprint(whatever)
+pp = pprint.PrettyPrinter(indent=4)
 
-try:
-    import matplotlib.pylab as plt
-    from matplotlib import pyplot
-    import mpl_toolkits.mplot3d.axes3d as p3
-    mpl = True
-except ImportError:
-    mpl = False
-
-
-# Various functions
-
-def Usage():
-    print """
-############################
-Usage:
-    importScout.py [-d] [-align] [-sift] filelist
-
- -d -> Debug mode that will display an image of the data being read for verification.  Requires matplotlib python binding installed
-
-This program can currently only read tif images that have been converted from
-Scout dng files along with their corresponding .nfo files.  The .tif and .nfo file
-must have the same name
-############################"""
-
+# Define the template for the KML overlay.  Trailing slash on the first line
+# keeps the XML declaration valid.
+kmlTemplate = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+    <name>KML Preview</name>
+    <open>1</open>
+    <description>Coverage preview of assets</description>
+ <Style id="examplePolyStyle">
+      <LineStyle>
+        <width>1.5</width>
+      </LineStyle>
+      <PolyStyle>
+        <color>7d00ffff</color>
+      </PolyStyle>
+  </Style>
+  <Placemark>
+    <name>KML Coverage Preview</name>
+    <styleUrl>#examplePolyStyle</styleUrl>
+    <MultiGeometry>
+        {}
+    </MultiGeometry>
+  </Placemark>
+  </Document>
+</kml>
+"""
 
 def getExif(fn):
     ret = {}
@@ -107,7 +108,7 @@ def getGPSData(exif):
     if lonref == 'W':
         lon = -lon
 
-    print 'getGPSData: lat {} lon {} alt {} bearing {}'.format(lat, lon, alt, bearing)
+    logging.debug('getGPSData: lat {} lon {} alt {} bearing {}'.format(lat, lon, alt, bearing))
     return lat, lon, alt, bearing
 
 
@@ -119,7 +120,7 @@ def createTransform(lat, lon, alt, bearing):
     lat = lat * 180.0 / np.pi
     lon = lon * 180.0 / np.pi
     east, north = transform(inProj, outProj, lon, lat)
-    print 'Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north)
+    logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north))
     (xres, yres) = calcResolution(alt)
 
     # hard coded to scout parameters for PhotoS3 camera
@@ -161,22 +162,22 @@ def createBoxTransform(lat, lon, alt, bearing):
     #bearing += 90  # correct for scout northing
 
     east, north = transform(inProj, outProj, lon, lat)
-    print 'Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north)
+    logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north))
 
-    print 'Center Point: ' + str(east) + ' ' + str(north)
+    logging.debug('Center Point: ' + str(east) + ' ' + str(north))
 
     (xSizeM, ySizeM) = calcResolutionFlir(alt)
 
-    print "Altitude {} Bearing {}".format(alt, bearing)
-    print "Footprint in meters: {} x {} y".format(xSizeM * 2, ySizeM * 2)
-    print "xSizeM {} ySizeM {}".format(xSizeM, ySizeM)
+    logging.debug("Altitude {} Bearing {}".format(alt, bearing))
+    logging.debug("Footprint in meters: {} x {} y".format(xSizeM * 2, ySizeM * 2))
+    logging.debug("xSizeM {} ySizeM {}".format(xSizeM, ySizeM))
 
     offsetUrX, offsetUrY = rotate(bearing, xSizeM, ySizeM)  # ur = upper right
     offsetUlX, offsetUlY = rotate(bearing, -xSizeM, ySizeM)  # ul
     offsetLlX, offsetLlY = rotate(bearing, -xSizeM, -ySizeM)  # ll
     offsetLrX, offsetLrY = rotate(bearing, xSizeM, -ySizeM)  # lr
 
-    print "Offsets: {} {}\n{} {}\n{} {}\n{} {}".format(offsetUrX, offsetUrY, offsetUlX, offsetUlY, offsetLlX, offsetLlY, offsetLrX, offsetLrY)
+    logging.debug("Offsets: {} {}\n{} {}\n{} {}\n{} {}".format(offsetUrX, offsetUrY, offsetUlX, offsetUlY, offsetLlX, offsetLlY, offsetLrX, offsetLrY))
 
     lonUR = east + offsetUrX
     latUR = north + offsetUrY
@@ -187,7 +188,7 @@ def createBoxTransform(lat, lon, alt, bearing):
     lonLR = east + offsetLrX
     latLR = north + offsetLrY
 
-    print "{},{},0\n{},{},0\n{},{},0\n{},{},0".format(lonUR, latUR, lonUL, latUL, lonLL, latLL, lonLR, latLR)
+    logging.debug("{},{},0\n{},{},0\n{},{},0\n{},{},0".format(lonUR, latUR, lonUL, latUL, lonLL, latLL, lonLR, latLR))
 
     return {
         'lonUR': lonUR,
@@ -201,7 +202,7 @@ def createBoxTransform(lat, lon, alt, bearing):
     }
 
 
-def dumpKmlPoly(trans):
+def getKmlPoly(trans):
 
     outProj = Proj(init='EPSG:4326')
     inProj = Proj(init='EPSG:3857')
@@ -212,8 +213,7 @@ def dumpKmlPoly(trans):
     kml['lonLL'], kml['latLL'] = transform(inProj, outProj, trans['lonLL'], trans['latLL'])
     kml['lonLR'], kml['latLR'] = transform(inProj, outProj, trans['lonLR'], trans['latLR'])
 
-    f = open('test.kml', 'a')
-    f.write("""
+    return """
     <Polygon>
       <extrude>1</extrude>
       <altitudeMode>clampToGround</altitudeMode>
@@ -229,9 +229,8 @@ def dumpKmlPoly(trans):
         </LinearRing>
       </outerBoundaryIs>
     </Polygon>
-    """.format(**kml))
-    f.close()
-    
+    """.format(**kml)
+
 
 def parseNFO(file):
     try:
@@ -319,53 +318,45 @@ def calcResolutionFlir(altM):
     xfovm = altM * math.tan(xfovRad / 2)
     yfovm = altM * math.tan(yfovRad / 2)
 
-    print "xFovM {} yFovM {}".format(xfovm, yfovm)
+    logging.debug("xFovM {} yFovM {}".format(xfovm, yfovm))
     return xfovm, yfovm
 
 
 if __name__ == '__main__':
-    # parse command line options
 
-    cl = sys.argv[1:]
+    # Set up default values, these should be made configurable via command line in the future
 
-    i = 1  # i will be start index of file list
-    count = 0  # count will be number of files in file list
-    plot = 0
-    for item in cl:
-        item.rstrip()
-        if item == '-d' and mpl == True:
-            #debug plot mode
-            plot = 1
-            i = i + 1
-        elif item == '-align':
-            align = True
-            i = i + 1
-        elif item == '-sift' and sift == True:
-            siftalign = True
-            i = i + 1
-        else:
-            count = count + 1
-
-    if count == 0:
-        Usage()
+    # Tempfile location for scratch work when generating geotifs
+    tempFile = '/tmp/temp.tif'
 
     # Define UTM 11N projection with WKT.  This would need to be generalized for
     # data in other areas.  Test data is in 16N.
     proj = 'PROJCS["NAD83 / Alaska Albers",GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4269"]],UNIT["metre",1,AUTHORITY["EPSG","9001"]],PROJECTION["Albers_Conic_Equal_Area"],PARAMETER["standard_parallel_1",55],PARAMETER["standard_parallel_2",65],PARAMETER["latitude_of_center",50],PARAMETER["longitude_of_center",-154],PARAMETER["false_easting",0],PARAMETER["false_northing",0],AUTHORITY["EPSG","3338"],AXIS["X",EAST],AXIS["Y",NORTH]]'
 
-    files = sys.argv[i:]
-    salen = count
-    i = 0
-    lat = np.zeros([salen])
-    lon = np.zeros([salen])
-    alt = np.zeros([salen])
-    bearing = np.zeros([salen])
+    # Handle command line options
+    parser = argparse.ArgumentParser(description='Georeference aerial images by GPS coordinates, and create coverage previews.')
+    parser.add_argument('--kml', '-k', action='store_true')
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('filelist', nargs=argparse.REMAINDER, type=file)
+    args = parser.parse_args()
+    pp.pprint(args)
 
-    for file in files:
-        print file
+    if(args.debug == True):
+        logLevel = logging.DEBUG
+    else:
+        logLevel = logging.INFO
+
+    # Set up logging
+    logging.basicConfig(format='%(levelname)s: %(message)s', level=logLevel)
+
+    # Variable for accumulating KML information, if requested
+    kml = ''
+
+    for file in args.filelist:
+        logging.info('Processing {}...'.format(file.name))
 
         # Assuming for now that JPG === infrared/FLIR.
-        if 'jpg' in file:
+        if 'jpg' in file.name:
             try:
                 exif = getExif(file)
                 (lat, lon, alt, bearing) = getGPSData(exif)
@@ -376,30 +367,31 @@ if __name__ == '__main__':
 
                 trans = createBoxTransform(lat, lon, alt, bearing)
 
-                trans['sourceFile'] = file
-                trans['tempFile'] = '/tmp/temp.tif'
-                trans['outputFile'] = os.path.splitext(file)[0] + '.tif'
+                trans['sourceFile'] = file.name
+                trans['tempFile'] = tempFile
+                trans['outputFile'] = os.path.splitext(file.name)[0] + '.tif'
 
-                if(os.path.exists('/tmp/temp.tif')):
-                    os.unlink('/tmp/temp.tif')
+                if(True == args.kml):
+                    kml += getKmlPoly(trans)
+                else:
+                    if(os.path.exists(trans['tempFile'])):
+                        os.unlink(trans['tempFile'])
 
-                if(os.path.exists(trans['outputFile'])):
-                    os.unlink(trans['outputFile'])
+                    if(os.path.exists(trans['outputFile'])):
+                        os.unlink(trans['outputFile'])
 
-                gdalTransformCommand = 'gdal_translate -a_srs EPSG:3857 -of GTiff -gcp 0 0 {lonUL} {latUL} -gcp 640 0 {lonUR} {latUR} -gcp 0 480 {lonLL} {latLL} -gcp 640 480 {lonLR} {latLR} {sourceFile} {tempFile}'.format(**trans)
-                print gdalTransformCommand
+                    gdalTransformCommand = 'gdal_translate -a_srs EPSG:3857 -of GTiff -gcp 0 0 {lonUL} {latUL} -gcp 640 0 {lonUR} {latUR} -gcp 0 480 {lonLL} {latLL} -gcp 640 480 {lonLR} {latLR} {sourceFile} {tempFile}'.format(**trans)
+                    logging.debug(gdalTransformCommand)
 
-                dumpKmlPoly(trans)
-
-                os.system(gdalTransformCommand)
-                gdalWarpCommand = 'gdalwarp -s_srs EPSG:3857 -t_srs EPSG:4326 -dstalpha -dstnodata 0,0,0,0 {tempFile} {outputFile}'.format(**trans)
-                print gdalWarpCommand
-                os.system(gdalWarpCommand)
+                    os.system(gdalTransformCommand)
+                    gdalWarpCommand = 'gdalwarp -s_srs EPSG:3857 -t_srs EPSG:4326 -dstalpha -dstnodata 0,0,0,0 {tempFile} {outputFile}'.format(**trans)
+                    logging.debug(gdalWarpCommand)
+                    os.system(gdalWarpCommand)
 
             except IOError as e:
-                print "Unable to process file (" + file + "): I/O error({0}): {1}".format(e.errno, e.strerror)
+                logging.warning("Unable to process file (" + file.name + "): I/O error({0}): {1}".format(e.errno, e.strerror))
             except ValueError as e:
-                print "Unable to process file (" + file + "): " + str(e)
+                logging.warning("Unable to process file (" + file.name + "): " + str(e))
 
         elif 'dng' in file:
             (xsize, ysize, data) = read_gdal_file(file, bearing, 2)
@@ -413,7 +405,7 @@ if __name__ == '__main__':
             tifFile = file.replace('dng', 'tif')
             writeGDALFile('temp.tif', trans, proj, data)
             cmd = 'gdalwarp -t_srs EPSG:32611 temp.tif ' + tifFile
-            print cmd
+            logging.debug(cmd)
             os.system(cmd)
 
         elif 'tif' in file:
@@ -424,7 +416,7 @@ if __name__ == '__main__':
                 # If the output file exists, skip.  TODO, make it possible to
                 # override with --force or --overwrite.
                 if False and os.path.exists(tiffFile):
-                    print "File already processed, skipping.\n"
+                    logging.info("File already processed, skipping.\n")
                     continue
 
                 key, value = parseNFO(nfoFile)
@@ -447,3 +439,10 @@ if __name__ == '__main__':
             except ValueError as e:
                 print "Unable to process file (" + file + "): " + str(e)
 
+    if(True == args.kml):
+        if(args.kml):
+            if(os.path.exists('coverage.kml')):
+                os.unlink('coverage.kml')
+        kmlFile = open('coverage.kml', 'w')
+        kmlFile.write(kmlTemplate.format(kml))
+        kmlFile.close()

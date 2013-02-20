@@ -46,12 +46,8 @@ from PIL.ExifTags import TAGS
 import sys
 import math
 import numpy as np
-from pyproj import transform, Proj, Geod
+from pyproj import transform, Proj
 import pprint
-
-# import local modules
-sys.path.append('.')
-import transformations
 
 # Optional modules
 try:
@@ -72,18 +68,18 @@ except ImportError:
 # Various functions
 
 def Usage():
-    print "############################"
-    print "Usage:"
-    print "    importScout.py [-d] [-align] [-sift] filelist"
-    print ""
-    print " -d -> Debug mode that will display an image of the data being read for verification.  Requires matplotlib python binding installed"
-    print " -align -> Performs FFT-based alignment of adjacent images.  NOT IMPLEMENTED AT CURRENT TIME"
-    print " -sift ->  Performs SIFT-based alignment of adjacent images.  Better for images with rotation error.  NOT IMPLEMENTED AT CURRENT TIME"
-    print ""
-    print "This program can currently only read tif images that have been converted from "
-    print "Scout dng files along with their corresponding .nfo files.  The .tif and .nfo file"
-    print "must have the same name"
-    print "############################"
+    print """
+############################
+Usage:
+    importScout.py [-d] [-align] [-sift] filelist
+
+ -d -> Debug mode that will display an image of the data being read for verification.  Requires matplotlib python binding installed
+
+This program can currently only read tif images that have been converted from
+Scout dng files along with their corresponding .nfo files.  The .tif and .nfo file
+must have the same name
+############################"""
+
 
 def getExif(fn):
     ret = {}
@@ -111,26 +107,8 @@ def getGPSData(exif):
     if lonref == 'W':
         lon = -lon
 
+    print 'getGPSData: lat {} lon {} alt {} bearing {}'.format(lat, lon, alt, bearing)
     return lat, lon, alt, bearing
-
-
-def calcImageParams(file, lat, lon, alt, bearing):
-    # This function calculates the necessary image parameters to generate a
-    # standard world file.  Requires lat,lon,alt,bearing provided by getGPSData
-    fh = gdal.Open(file)
-    #xsize = fh.RasterXSize
-    #ysize = fh.RasterYSize
-    inProj = Proj(init='epsg:4326')
-    outProj = Proj(init='epsg:32611')
-    (east, north) = transform(inProj, outProj, lon, lat)
-    xres = 0.0064
-    yres = 0.0064
-    #xUL = east - (xres * xsize / 2)
-    #yUL = north + (yres * ysize / 2)
-    bearingRad = bearing * 3.14159 / 180
-    tanb = math.tan(bearingRad)
-    line2 = -1 * tanb * xres
-    line3 = -1 * tanb * yres
 
 
 def createTransform(lat, lon, alt, bearing):
@@ -141,7 +119,7 @@ def createTransform(lat, lon, alt, bearing):
     lat = lat * 180.0 / np.pi
     lon = lon * 180.0 / np.pi
     east, north = transform(inProj, outProj, lon, lat)
-    print 'Center Point: ' + str(east) + ' ' + str(north)
+    print 'Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north)
     (xres, yres) = calcResolution(alt)
 
     # hard coded to scout parameters for PhotoS3 camera
@@ -177,13 +155,13 @@ def rotate(angle, x, y):
 
 
 def createBoxTransform(lat, lon, alt, bearing):
-    # This function calculates the necessary image parameters to generate a
-    # standard world file.  Requires lat,lon,alt,bearing provided by getGPSData
+
     inProj = Proj(init='EPSG:4326')
-    outProj = Proj(init='EPSG:3338')
-    lat = lat * 180.0 / np.pi
-    lon = lon * 180.0 / np.pi
+    outProj = Proj(init='EPSG:3857')
+    #bearing += 90  # correct for scout northing
+
     east, north = transform(inProj, outProj, lon, lat)
+    print 'Original lon {} lat {} Transformed lon {} lat {}'.format(lon, lat, east, north)
 
     print 'Center Point: ' + str(east) + ' ' + str(north)
 
@@ -191,7 +169,6 @@ def createBoxTransform(lat, lon, alt, bearing):
 
     print "Altitude {} Bearing {}".format(alt, bearing)
     print "Footprint in meters: {} x {} y".format(xSizeM * 2, ySizeM * 2)
-
     print "xSizeM {} ySizeM {}".format(xSizeM, ySizeM)
 
     offsetUrX, offsetUrY = rotate(bearing, xSizeM, ySizeM)  # ur = upper right
@@ -314,233 +291,35 @@ def calcResolutionFlir(altM):
     return xfovm, yfovm
 
 
-def alignImages(master,slave,plot=0,aligntype=0):
-    # Open the files
-    mh = gdal.Open(master)
-    sh = gdal.Open(slave)
-    # Get band 1 data and read as a numpy array
-    md = mh.GetRasterBand(2)
-    sd = sh.GetRasterBand(2)
-    # Get the geo transoform
-    mtrans = mh.GetGeoTransform()
-    strans = sh.GetGeoTransform()
-    # Need to get corner coords from transform
-    mxsize = mh.RasterXSize
-    mysize = mh.RasterYSize
-    sxsize = sh.RasterXSize
-    sysize = sh.RasterYSize
-    muleast = mtrans[0]
-    mulnorth = mtrans[3]
-    suleast = strans[0]
-    sulnorth = strans[3]
-    mlleast = muleast + mxsize*mtrans[1]
-    mllnorth = mulnorth + mysize*mtrans[5]
-    slleast = suleast + sxsize*strans[1]
-    sllnorth = sulnorth + sysize*strans[5]
-
-    # Determine the extent of overlap and the indices 
-    # for master and slave overlap region
-    if muleast > suleast:
-        uleast = muleast
-        muleindex = 0
-        suleindex = int((muleast-suleast)/strans[1])
-    else:
-        uleast = suleast
-        suleindex = 0
-        muleindex = int((suleast-muleast)/mtrans[1])
-    if mlleast < slleast:
-        lleast = mlleast
-        mlleindex = mxsize-1
-        slleindex = sxsize - int((slleast-mlleast)/strans[1])
-    else:
-        lleast = slleast
-        slleindex = sxsize-1
-        mlleindex = mxsize - int((mlleast-slleast)/mtrans[1])
-
-    if mulnorth < sulnorth:
-        ulnorth = mulnorth
-        mulnindex = 0
-        sulnindex = int(-1*(sulnorth-mulnorth)/strans[5])
-    else:
-        ulnorth = sulnorth
-        sulnindex = 0
-        mulnindex = int(-1*(mulnorth-sulnorth)/mtrans[5])
-    if mllnorth > sllnorth:
-        llnorth = mllnorth
-        mllnindex = mysize-1 
-        sllnindex = sysize - int((sllnorth - mllnorth)/strans[5])
-    else:
-        llnorth = sllnorth
-        sllnindex = sysize-1 
-        mllnindex = mysize - int((mllnorth - sllnorth)/mtrans[5])
-
-    # Extract overlap region in master and use it to ingest overlap region 
-    # from slave at same resolution
-    xsize = (mllnindex-mulnindex)/5
-    ysize = (mlleindex-muleindex)/5
-    print xsize,' ',ysize
-    mdata = md.ReadAsArray(muleindex,mulnindex,mlleindex-muleindex,mllnindex-mulnindex,ysize,xsize)
-    #mdata = mdtemp[mulnindex:mllnindex,muleindex:mlleindex]
-    #xsize,ysize = np.shape(mdata)
-    sdata = sd.ReadAsArray(suleindex,sulnindex,slleindex-suleindex,sllnindex-sulnindex,ysize,xsize)
-
-    # Perform a 2-sigma stretch of the non-zero elements 
-    mdmean = np.mean(mdata.ravel()[np.flatnonzero(mdata)])
-    mdstd = np.std(mdata.ravel()[np.flatnonzero(mdata)])
-    sdmean = np.mean(sdata.ravel()[np.flatnonzero(sdata)])
-    sdstd = np.std(sdata.ravel()[np.flatnonzero(sdata)])
-
-    md2 = (mdata - mdmean)/(2*mdstd)
-    np.putmask(md2,md2>1,1)
-    np.putmask(md2,md2<-1,-1)
-    md2 = md2*127 + 127
-
-    mdata = md2
-
-    sd2 = (sdata - sdmean)/(2*sdstd)
-    np.putmask(sd2,sd2>1,1)
-    np.putmask(sd2,sd2<-1,-1)
-    sd2 = sd2*127 + 127
-
-    sdata = sd2
-
-    # calculate scaling factors between two images (this should only be the result of 
-    # pixel size difference if all is correct
-    yscale = float((slleindex-suleindex))/float(ysize)
-    xscale = float((sllnindex-sulnindex))/float(xsize)
-
-    if plot == 1:
-        pyplot.figure()
-        pyplot.imshow(mdata,cmap='gray',interpolation='nearest')
-        pyplot.figure()
-        pyplot.imshow(sdata,cmap='gray',interpolation='nearest')
-        pyplot.show()
-
-    ref_patch = mdata
-    test_patch = sdata
-
-    if aligntype == 0:
-
-        # This is SIFT align.  It is different than FFT-based and requires that the images being aligned
-        # are oriented to their centers.  
-        xsize = (int(mh.RasterXSize)-400)/4
-        ysize = (int(mh.RasterYSize)-400)/4
-
-        ref_patch = md.ReadAsArray(200,200,int(mh.RasterXSize)-200,int(mh.RasterYSize)-200,xsize,ysize)
-        test_patch = sd.ReadAsArray(200,200,int(sh.RasterXSize)-200,int(sh.RasterYSize)-200,xsize,ysize)
-
-        writeSimpleFile('file1.tif',ref_patch) 
-        writeSimpleFile('file2.tif',test_patch) 
-        vl.process_image('file1.tif','file1.sift')
-        l1,d1 = vl.read_features_from_file('file1.sift')
-        vl.process_image('file2.tif','file2.sift')
-        l2,d2 = vl.read_features_from_file('file2.sift')
-        m = vl.match_twosided(d1,d2)
-
-        im = np.array(Image.open('file1.tif'))
-        im2 = np.array(Image.open('file2.tif'))
-        pyplot.figure()
-        vl.plot_features(im,l1,True)
-        pyplot.gray()
-
-        pyplot.figure()
-        pyplot.imshow(im)
-        
-        # draw lines for matches
-        for i in range(len(m)):
-            if m[i] > 0:
-                pyplot.plot([l1[i,0], l2[m[i,0],0]], [l1[i,1], l2[m[i,0],1]], 'c')
-
-
-
-        pyplot.figure()
-        vl.plot_matches(im,im2,l1,l2,m)
-        pyplot.gray()
-
-        pyplot.figure()
-        for i in range(len(m)):
-         if m[i] > 0:
-             pyplot.scatter(l1[i,0], l2[m[i,0],0]) #, [locs1[i,1], locs2[matchscores[i,0],1]], 'c')
-
-        pyplot.figure()
-        for i in range(len(m)):
-         if m[i] > 0:
-             pyplot.scatter(l1[i,1], l2[m[i,0],1])
-
-        pyplot.figure()
-        for i in range(len(m)):
-         if m[i] > 0:
-             pyplot.scatter(l1[i,1], math.sqrt((l2[m[i,0],1]-l1[i,1])**2 + (l2[m[i,0],0]-l1[i,0])**2))
-
-        pyplot.show()
-
-    else:
-    
-        fft1 = np.fft.fft2(ref_patch)
-        fft2 = np.fft.fft2(test_patch)
-        fft2_conj = np.conjugate(fft2)
-        
-        result = fft1 * fft2_conj/abs(fft1 * fft2_conj)
-        shift = np.fft.ifft2(result)
-
-        realshift = abs(shift)
-        shiftmax = realshift.max()
-        shiftmin = realshift.min()
-        shiftmean = realshift.mean()
-        shiftsnr = shiftmax / shiftmean
-
-        maxloc = np.argmax(realshift)
-        dims = realshift.shape
-        maxindex = np.unravel_index(maxloc, dims)
-        xloc = maxindex[0]
-        yloc = maxindex[1]
-        snr = shiftsnr
-        
-        if xloc > xsize / 2:
-            xloc = xloc - xsize
-        if yloc > ysize / 2:
-            yloc = yloc - ysize
-        
-        radloc = np.sqrt(xloc * xloc + yloc * yloc)
-    
-        xloc = float(xloc) * mtrans[1] * 5.0
-        yloc = float(yloc) * mtrans[5] * 5.0
-    
-        print "%.2f, %.2f, %.2f, %.2f" % (xloc, yloc, radloc, snr)
-    
-    return 1
-    
-
-
-if __name__=='__main__':
+if __name__ == '__main__':
     # parse command line options
-    
+
     cl = sys.argv[1:]
-    
-    i = 1 # i will be start index of file list
-    count = 0 # count will be number of files in file list
-    plot = 0 
+
+    i = 1  # i will be start index of file list
+    count = 0  # count will be number of files in file list
+    plot = 0
     for item in cl:
         item.rstrip()
         if item == '-d' and mpl == True:
             #debug plot mode
             plot = 1
-            i = i+1
+            i = i + 1
         elif item == '-align':
             align = True
-            i = i+1
-        elif item == '-sift' and sift==True:
+            i = i + 1
+        elif item == '-sift' and sift == True:
             siftalign = True
-            i = i+1
+            i = i + 1
         else:
-            count = count+1
-    
-    if count ==0:
+            count = count + 1
+
+    if count == 0:
         Usage()
-   
-    # Define UTM 11N projection with WKT.  This would need to be generalized for 
+
+    # Define UTM 11N projection with WKT.  This would need to be generalized for
     # data in other areas.  Test data is in 16N.
-    proj = "PROJCS[\"WGS 84 / UTM zone 16N\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.01745329251994328,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",-117],PARAMETER[\"scale_factor\",0.9996],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],AUTHORITY[\"EPSG\",\"32611\"],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]]"
+    proj = 'PROJCS["NAD83 / Alaska Albers",GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4269"]],UNIT["metre",1,AUTHORITY["EPSG","9001"]],PROJECTION["Albers_Conic_Equal_Area"],PARAMETER["standard_parallel_1",55],PARAMETER["standard_parallel_2",65],PARAMETER["latitude_of_center",50],PARAMETER["longitude_of_center",-154],PARAMETER["false_easting",0],PARAMETER["false_northing",0],AUTHORITY["EPSG","3338"],AXIS["X",EAST],AXIS["Y",NORTH]]'
 
     files = sys.argv[i:]
     salen = count
@@ -552,25 +331,35 @@ if __name__=='__main__':
 
     for file in files:
         print file
+
+        # Assuming for now that JPG === infrared/FLIR.
         if 'jpg' in file:
             try:
                 exif = getExif(file)
                 (lat, lon, alt, bearing) = getGPSData(exif)
-                calcImageParams(file, lat, lon, alt, bearing)
-                lat = lat * np.pi / 180.0
-                lon = lon * np.pi / 180.0
+
                 # bearing is corrected as data are read in as though they are collected along northern bearing line
                 if bearing > 90 and bearing < 270:
                     bearing = bearing - 180
+
                 trans = createBoxTransform(lat, lon, alt, bearing)
+
                 trans['sourceFile'] = file
+                trans['tempFile'] = '/tmp/temp.tif'
                 trans['outputFile'] = os.path.splitext(file)[0] + '.tif'
-                gdalTransformCommand = 'gdal_translate -of GTiff -a_srs EPSG:3338 -gcp 0 0 {lonUL} {latUL} -gcp 640 0 {lonUR} {latUR} -gcp 0 480 {lonLL} {latLL} -gcp 640 480 {lonLR} {latLR} {sourceFile} {outputFile}'.format(**trans)
+
+                if(os.path.exists('/tmp/temp.tif')):
+                    os.unlink('/tmp/temp.tif')
+
+                if(os.path.exists(trans['outputFile'])):
+                    os.unlink(trans['outputFile'])
+
+                gdalTransformCommand = 'gdal_translate -a_srs EPSG:3857 -of GTiff -gcp 0 0 {lonUL} {latUL} -gcp 640 0 {lonUR} {latUR} -gcp 0 480 {lonLL} {latLL} -gcp 640 480 {lonLR} {latLR} {sourceFile} {tempFile}'.format(**trans)
                 print gdalTransformCommand
-                #os.system(gdalTransformCommand)
-                gdalWarpCommand = 'gdalwarp -dstnodata 0,0,0,0 -t_srs EPSG:3786 {outputFile} {outputFile}'.format(**trans)
+                os.system(gdalTransformCommand)
+                gdalWarpCommand = 'gdalwarp -s_srs EPSG:3857 -t_srs EPSG:4326 -dstalpha -dstnodata 0,0,0,0 {tempFile} {outputFile}'.format(**trans)
                 print gdalWarpCommand
-                #os.system(gdalWarpCommand)
+                os.system(gdalWarpCommand)
 
             except IOError as e:
                 print "Unable to process file (" + file + "): I/O error({0}): {1}".format(e.errno, e.strerror)

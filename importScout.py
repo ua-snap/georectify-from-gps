@@ -24,19 +24,7 @@
 # License along with this library; if not, write to the
 # Free Software Foundation, Inc., 59 Temple Place - Suite 330,
 # Boston, MA 02111-1307, USA.
-###############################################################################
-# NOTES:
-#
-#  This software was designed to read a variety of formats that can come from teh Scout.  
-#  however, only the tif version currently works.  The dng import should work, however, both GDAL and PIL
-#  read the dng files at half resolution.  Once this is resolved, the workflow for tif and dng are
-#  identical.
-#
-#
-#
-
-
-# Import necessary modules
+#############################################################################
 
 # Required modules
 import os
@@ -111,13 +99,7 @@ class GeoImage:
     def parseImageParams(self):
         return
 
-
-class ScoutFlirGeoImage(GeoImage):
-    def parseCameraParams(self):
-        self.xFovRad = math.radians(32)
-        self.yFovRad = math.radians(26)
-
-    def parseImageParams(self):
+    def parseFromExif(self):
         exif = {}
         i = Image.open(self.file)
         info = i._getexif()
@@ -144,8 +126,50 @@ class ScoutFlirGeoImage(GeoImage):
         if lonref == 'W':
             lon = -lon
 
-        logging.debug('getGPSData: lat {} lon {} alt {} bearing {}'.format(lat, lon, alt, bearing))
+        logging.debug('parseFromExif: lat {} lon {} alt {} bearing {}'.format(lat, lon, alt, bearing))
         (self.lat, self.lon, self.alt, self.bearing) = (lat, lon, alt, bearing)
+
+
+class ScoutFlirGeoImage(GeoImage):
+    def parseCameraParams(self):
+        self.xFovRad = math.radians(32)
+        self.yFovRad = math.radians(26)
+
+    def parseImageParams(self):
+        self.parseFromExif()
+
+
+class ScoutPhotoS3GeoImage(GeoImage):
+
+    def parseCameraParams(self):
+        self.xRes = 2592
+        self.yRes = 1944
+        self.xSizeMm = 5.7024
+        self.ySizeMm = 4.2768
+        self.focalLength = 7.5
+        self.xFovRad = 0.557711
+        self.yFovRad = 0.423049
+
+    def parseImageParams(self):
+        # TODO: make this check if it should use the NFO or other means.
+        nfo = self.parseNFO()
+        self.lat = float(nfo['gps_lat_deg'])
+        self.lon = float(nfo['gps_lon_deg'])
+        self.bearing = float(nfo['yaw_deg'])
+        self.alt = float(nfo['alt_agl'])
+        logging.debug('parsed from NFO: lat {} lon {} alt {} bearing {}'.format(self.lat, self.lon, self.alt, self.bearing))
+
+    def parseNFO(self):
+        nfo = {}
+        try:
+            for line in self.file:
+                (k, v) = line.split('=')
+                k = k.rstrip()
+                v = v.rstrip()
+                nfo[k] = v
+            return nfo
+        except ValueError as e:
+            raise ValueError("NFO file is malformed (" + e + ")")
 
 
 # From a GeoImage, perform the georectification calculations
@@ -165,9 +189,10 @@ class GeoRectifier:
 
         (east, north) = transform(inProj, outProj, self.geoImage.lon, self.geoImage.lat)
         logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(self.geoImage.lon, self.geoImage.lat, east, north))
+        logging.debug('self.geoImage.x.FovRad={}'.format(self.geoImage.xFovRad))
 
-        self.xFovM = self.geoImage.alt * math.tan(self.geoImage.xFovRad / 2)
-        self.yFovM = self.geoImage.alt * math.tan(self.geoImage.yFovRad / 2)
+        self.xFovM = 2*self.geoImage.alt * math.tan(self.geoImage.xFovRad / 2)
+        self.yFovM = 2*self.geoImage.alt * math.tan(self.geoImage.yFovRad / 2)
 
         logging.debug("xFovM {} yFovM {}".format(self.xFovM, self.yFovM))
         logging.debug("Altitude {} Bearing {}".format(self.geoImage.alt, self.geoImage.bearing))
@@ -212,7 +237,6 @@ def rotate(angle, x, y):
 
 
 def getKmlPoly(trans):
-
     outProj = Proj(init='EPSG:4326')
     inProj = Proj(init='EPSG:3857')
 
@@ -274,9 +298,10 @@ if __name__ == '__main__':
     for file in args.filelist:
         logging.info('Processing {}...'.format(file.name))
 
-        # Assuming for now that JPG === infrared/FLIR.
-        if 'jpg' in file.name:
-            try:
+        try:
+
+            # Assuming for now that JPG === infrared/FLIR.
+            if 'jpg' in file.name:
 
                 i = ScoutFlirGeoImage(file)
                 i.parseCameraParams()
@@ -306,65 +331,36 @@ if __name__ == '__main__':
                     logging.debug(gdalWarpCommand)
                     os.system(gdalWarpCommand)
 
-            except IOError as e:
-                logging.warning("Unable to process file (" + file.name + "): I/O error({0}): {1}".format(e.errno, e.strerror))
-            except ValueError as e:
-                logging.warning("Unable to process file (" + file.name + "): " + str(e))
+            elif 'nfo' in file.name:
+                i = ScoutPhotoS3GeoImage(file)
+                i.parseCameraParams()
+                i.parseImageParams()
 
+                r = GeoRectifier(i)
+                trans = r.transform()
+                if(True == args.kml):
+                    kml += getKmlPoly(trans)
 
+        except IOError as e:
+            logging.warning("Unable to process file (" + file.name + "): I/O error({0}): {1}".format(e.errno, e.strerror))
+        except ValueError as e:
+            logging.warning("Unable to process file (" + file.name + "): " + str(e))
 
-    if(True == args.kml):
-        if(args.kml):
-            if(os.path.exists('coverage.kml')):
-                os.unlink('coverage.kml')
-        kmlFile = open('coverage.kml', 'w')
-        kmlFile.write(kmlTemplate.format(kml))
-        kmlFile.close()
-
+        if(True == args.kml):
+            if(args.kml):
+                if(os.path.exists('coverage.kml')):
+                    os.unlink('coverage.kml')
+            kmlFile = open('coverage.kml', 'w')
+            kmlFile.write(kmlTemplate.format(kml))
+            kmlFile.close()
 
 
 """
 to implement later / swamp:
 
-class ScoutPhotoS3GeoImage(GeoImage):
-    def parseCameraParams(self):
-        self.xSizeMm = 5.7024
-        self.ySizeMm = 4.2768
-        self.focalLength = 7.5
-
-    def parseNFO(file):
-        try:
-            f = open(file)
-            j = 0
-            #lines = 28
-            key = []
-            value = []
-            for line in f:
-                (k, v) = line.split('=')
-                key.append(k.rstrip())
-                value.append(v.rstrip())
-                j = j + 1
-            return key, value
-        except ValueError as e:
-            raise ValueError("NFO file is malformed (" + e + ")")
+    
 
 
-def calcResolution():
-        # Define parameters for Scout camera
-        xsize = 2592
-        ysize = 1944
-        xsizemm = 5.7024
-        ysizemm = 4.2768
-        fl = 7.5
-        xfov = 2*math.atan(xsizemm/(2*fl))
-        yfov = 2*math.atan(ysizemm/(2*fl))
-        xfovm = 2*math.tan(xfov/2)*alt
-        yfovm = 2*math.tan(yfov/2)*alt
-        xrescm = xfovm/xsize
-        yrescm = -1*yfovm/ysize
-        print xrescm
-        print yrescm
-        return xrescm,yrescm
 
 
          elif 'dng' in file:

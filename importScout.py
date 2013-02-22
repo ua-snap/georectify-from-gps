@@ -188,11 +188,12 @@ class GeoRectifier:
         logging.debug(pprint.pformat(self.geoImage))
 
         (east, north) = transform(inProj, outProj, self.geoImage.lon, self.geoImage.lat)
+
         logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(self.geoImage.lon, self.geoImage.lat, east, north))
         logging.debug('self.geoImage.x.FovRad={}'.format(self.geoImage.xFovRad))
 
-        self.xFovM = 2*self.geoImage.alt * math.tan(self.geoImage.xFovRad / 2)
-        self.yFovM = 2*self.geoImage.alt * math.tan(self.geoImage.yFovRad / 2)
+        self.xFovM = self.geoImage.alt * math.tan(self.geoImage.xFovRad / 2)
+        self.yFovM = self.geoImage.alt * math.tan(self.geoImage.yFovRad / 2)
 
         logging.debug("xFovM {} yFovM {}".format(self.xFovM, self.yFovM))
         logging.debug("Altitude {} Bearing {}".format(self.geoImage.alt, self.geoImage.bearing))

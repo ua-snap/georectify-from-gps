@@ -28,12 +28,10 @@
 
 # Required modules
 import os
-from osgeo import gdal
 from PIL import Image
 from PIL.ExifTags import TAGS
 import sys
 import math
-import numpy as np
 from pyproj import transform, Proj
 import pprint
 import argparse
@@ -71,8 +69,32 @@ kmlTemplate = """\
 """
 
 
+def parse_nfo(file):
+        nfo = {}
+        try:
+            for line in file:
+                (k, v) = line.split('=')
+                k = k.rstrip()
+                v = v.rstrip()
+                nfo[k] = v
+            return nfo
+        except ValueError as e:
+            raise ValueError("NFO file is malformed (" + e + ")")
+
+
+def parse_exif(file):
+        exif = {}
+        i = Image.open(file)
+        info = i._getexif()
+        pprint.pprint(info)
+        for tag, value in info.items():
+            decoded = TAGS.get(tag, tag)
+            exif[decoded] = value
+        return exif
+
+
 # Responsible for figuring out image and camera properties from a file
-class GeoImage:
+class ImagePreprocessor:
     def __init__(self, file):
         self.file = file
 
@@ -92,21 +114,30 @@ class GeoImage:
         self.focalLength = None  # focal length (mm)
 
     # To be implemented by child classes
-    def parseCameraParams(self):
-        return
+    def parse_camera_params(self):
+        pass
 
     # to be implemented by child classes
-    def parseImageParams(self):
-        return
+    def parse_image_params(self):
+        pass
 
-    def parseFromExif(self):
-        exif = {}
-        i = Image.open(self.file)
-        info = i._getexif()
-        for tag, value in info.items():
-            decoded = TAGS.get(tag, tag)
-            exif[decoded] = value
+    def process(self):
+        self.parse_camera_params()
+        self.parse_image_params()
 
+
+class NullPreprocessor(ImagePreprocessor):
+    def process(self):
+        raise 'Could not determine preprocessor to use for file {}'.format(self.file.name)
+
+
+class ScoutFlirJpgPreprocessor(ImagePreprocessor):
+    def parse_camera_params(self):
+        self.xFovRad = math.radians(32)
+        self.yFovRad = math.radians(26)
+
+    def parse_image_params(self):
+        exif = parse_exif()
         # Read the exif data returned by getExif and parse out GPS lat, lon, alt and bearing
         lat = [float(x) / float(y) for x, y in exif['GPSInfo'][2]]
         latref = exif['GPSInfo'][1]
@@ -130,18 +161,9 @@ class GeoImage:
         (self.lat, self.lon, self.alt, self.bearing) = (lat, lon, alt, bearing)
 
 
-class ScoutFlirGeoImage(GeoImage):
-    def parseCameraParams(self):
-        self.xFovRad = math.radians(32)
-        self.yFovRad = math.radians(26)
+class ScoutPhotoS3NfoPreprocessor(ImagePreprocessor):
 
-    def parseImageParams(self):
-        self.parseFromExif()
-
-
-class ScoutPhotoS3GeoImage(GeoImage):
-
-    def parseCameraParams(self):
+    def parse_camera_params(self):
         self.xRes = 2592
         self.yRes = 1944
         self.xSizeMm = 5.7024
@@ -150,31 +172,19 @@ class ScoutPhotoS3GeoImage(GeoImage):
         self.xFovRad = 0.557711
         self.yFovRad = 0.423049
 
-    def parseImageParams(self):
+    def parse_image_params(self):
         # TODO: make this check if it should use the NFO or other means.
-        nfo = self.parseNFO()
+        nfo = parse_nfo()
         self.lat = float(nfo['gps_lat_deg'])
         self.lon = float(nfo['gps_lon_deg'])
         self.bearing = float(nfo['yaw_deg'])
         self.alt = float(nfo['alt_agl'])
         logging.debug('parsed from NFO: lat {} lon {} alt {} bearing {}'.format(self.lat, self.lon, self.alt, self.bearing))
 
-    def parseNFO(self):
-        nfo = {}
-        try:
-            for line in self.file:
-                (k, v) = line.split('=')
-                k = k.rstrip()
-                v = v.rstrip()
-                nfo[k] = v
-            return nfo
-        except ValueError as e:
-            raise ValueError("NFO file is malformed (" + e + ")")
-
 
 # From a GeoImage, perform the georectification calculations
 # Starting by hardcoding for this to be just the FLIR, will make it a superclass later
-class GeoRectifier:
+class GeoReferencer:
     def __init__(self, geoImage):
         self.geoImage = geoImage
 
@@ -190,13 +200,13 @@ class GeoRectifier:
         (east, north) = transform(inProj, outProj, self.geoImage.lon, self.geoImage.lat)
 
         logging.debug('Original lon {} lat {} Transformed lon {} lat {}'.format(self.geoImage.lon, self.geoImage.lat, east, north))
-        logging.debug('self.geoImage.x.FovRad={}'.format(self.geoImage.xFovRad))
+        logging.debug('self.geoImage.xFovRad={}'.format(self.geoImage.xFovRad))
+        logging.debug('self.geoImage.yFovRad={}'.format(self.geoImage.xFovRad))
 
         self.xFovM = self.geoImage.alt * math.tan(self.geoImage.xFovRad / 2)
         self.yFovM = self.geoImage.alt * math.tan(self.geoImage.yFovRad / 2)
 
         logging.debug("xFovM {} yFovM {}".format(self.xFovM, self.yFovM))
-        logging.debug("Altitude {} Bearing {}".format(self.geoImage.alt, self.geoImage.bearing))
         logging.debug("Footprint in meters: {} x {} y".format(self.xFovM * 2, self.yFovM * 2))
 
         offsetUrX, offsetUrY = rotate(self.geoImage.bearing, self.xFovM, self.yFovM)  # ur = upper right
@@ -214,8 +224,6 @@ class GeoRectifier:
         self.latLL = north + offsetLlY
         self.lonLR = east + offsetLrX
         self.latLR = north + offsetLrY
-
-        logging.debug("{},{},0\n{},{},0\n{},{},0\n{},{},0".format(self.lonUR, self.latUR, self.lonUL, self.latUL, self.lonLL, self.latLL, self.lonLR, self.latLR))
 
         return {
             'lonUR': self.lonUR,
@@ -237,7 +245,7 @@ def rotate(angle, x, y):
     return xr, yr
 
 
-def getKmlPoly(trans):
+def get_kml_poly(trans):
     outProj = Proj(init='EPSG:4326')
     inProj = Proj(init='EPSG:3857')
 
@@ -264,6 +272,41 @@ def getKmlPoly(trans):
       </outerBoundaryIs>
     </Polygon>
     """.format(**kml)
+
+
+def get_input_processor_from_file(file):
+    """
+    Figure out what camera is being used, and return an appropriate
+    decoder / preprocessor object.  Possible cases that aren't implemented
+    yet return a NullPreprocessor.
+
+    Incoming file is assumed to be a file handle.
+    """
+    preprocessor = None
+
+    # If the source file is a .jpg, check the EXIF tags
+    if 'jpg' in file.name:
+        exif = parse_exif()
+        if('BOARD_FLIR_TAU_640' == exif['Model']):
+            preprocessor = ScoutFlirJpgPreprocessor(file)
+
+    elif 'dng' in file.name:
+    # If the source file is a .dng read the associated .nfo to figure the camera
+        nfoFilename = None  # magic business to get the right name needed here
+        nfo = parse_nfo(nfoFilename)
+        if('BOARD_MT9P031_SUNEX' == nfo['camera_model']):
+            preprocessor = NullPreprocessor(file)  # This is a high priority path.
+
+    elif 'nfo' in file.name:
+    # If the source file is .nfo, read that
+        nfo = parse_nfo(file)
+        if('BOARD_MT9P031_SUNEX' == nfo['camera_model']):
+            preprocessor = ScoutPhotoS3NfoPreprocessor(file)
+
+    else:
+        preprocessor = NullPreprocessor(file)
+
+    return preprocessor
 
 
 if __name__ == '__main__':
@@ -296,20 +339,41 @@ if __name__ == '__main__':
     # Variable for accumulating KML information, if requested
     kml = ''
 
+    postprocessors = []
+
+    ## TBD: parallelize this after watching to see if that'd impact some of the
+    ## gdal / ufraw-batch work.
     for file in args.filelist:
         logging.info('Processing {}...'.format(file.name))
 
         try:
+            pre = get_input_processor_from_file(file)
+            pre.process()
+            r = GeoReferencer(pre)
+            trans = r.transform()
 
-            # Assuming for now that JPG === infrared/FLIR.
-            if 'jpg' in file.name:
+            for postprocessor in postprocessors:
+                postprocessor.process(file, trans)
 
-                i = ScoutFlirGeoImage(file)
-                i.parseCameraParams()
-                i.parseImageParams()
+        except IOError as e:
+            logging.warning("Unable to process file (" + file.name + "): I/O error({0}): {1}".format(e.errno, e.strerror))
+        except ValueError as e:
+            logging.warning("Unable to process file (" + file.name + "): " + str(e))
 
-                r = GeoRectifier(i)
-                trans = r.transform()
+
+
+
+"""
+to implement later / swamp:
+
+if(True == args.kml):
+            if(args.kml):
+                if(os.path.exists('coverage.kml')):
+                    os.unlink('coverage.kml')
+            kmlFile = open('coverage.kml', 'w')
+            kmlFile.write(kmlTemplate.format(kml))
+            kmlFile.close()
+    
 
                 trans['sourceFile'] = file.name
                 trans['tempFile'] = tempFile
@@ -337,29 +401,10 @@ if __name__ == '__main__':
                 i.parseCameraParams()
                 i.parseImageParams()
 
-                r = GeoRectifier(i)
+                r = GeoReferencer(i)
                 trans = r.transform()
                 if(True == args.kml):
                     kml += getKmlPoly(trans)
-
-        except IOError as e:
-            logging.warning("Unable to process file (" + file.name + "): I/O error({0}): {1}".format(e.errno, e.strerror))
-        except ValueError as e:
-            logging.warning("Unable to process file (" + file.name + "): " + str(e))
-
-        if(True == args.kml):
-            if(args.kml):
-                if(os.path.exists('coverage.kml')):
-                    os.unlink('coverage.kml')
-            kmlFile = open('coverage.kml', 'w')
-            kmlFile.write(kmlTemplate.format(kml))
-            kmlFile.close()
-
-
-"""
-to implement later / swamp:
-
-    
 
 
 
